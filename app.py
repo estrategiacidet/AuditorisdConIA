@@ -310,7 +310,15 @@ def parse_json_response(raw_text: str) -> dict:
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"\s*```$", "", cleaned)
-    return json.loads(cleaned)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            candidate = cleaned[start : end + 1]
+            return json.loads(candidate)
+        raise
 
 
 def normalize_status(value: str) -> str:
@@ -402,6 +410,82 @@ def build_chapter_summary(rows_payload: list[dict]) -> str:
             f"- {chapter}: Cumple={counts['Cumple']}, Parcial={counts['Cumple parcial']}, No cumple={counts['No cumple']}, No aplica={counts['No aplica']}, No evaluado={counts['No evaluado']}"
         )
     return "\n".join(summary_lines)
+
+
+def build_final_report(rows_payload: list[dict], contexto_previo: str) -> str:
+    total_rows = len(rows_payload)
+    counts = {
+        "Cumple": 0,
+        "Cumple parcial": 0,
+        "No cumple": 0,
+        "No aplica": 0,
+        "No evaluado": 0,
+    }
+    for row in rows_payload:
+        status = normalize_status(str(row.get("estado", "No evaluado")))
+        counts[status] = counts.get(status, 0) + 1
+
+    chapter_summary = build_chapter_summary(rows_payload)
+    conformes = [row for row in rows_payload if normalize_status(str(row.get("estado", ""))) == "Cumple"]
+    oportunidades = [
+        row
+        for row in rows_payload
+        if normalize_status(str(row.get("estado", ""))) in {"Cumple parcial", "No cumple", "No evaluado"}
+    ]
+
+    fortalezas_lines = []
+    for row in conformes[:8]:
+        fortalezas_lines.append(
+            f"- {row.get('id', 'N/A')}: {str(row.get('evidencia_encontrada', '')).strip() or 'Evidencia documentada en la matriz.'}"
+        )
+    if not fortalezas_lines:
+        fortalezas_lines.append("- No se identificaron conformidades concluyentes en la matriz procesada.")
+
+    mejora_lines = []
+    for row in oportunidades[:10]:
+        mejora_lines.append(
+            f"- {row.get('id', 'N/A')}: {str(row.get('analisis_hallazgo', '')).strip() or 'Revisar la evidencia disponible y completar la validación documental.'}"
+        )
+    if not mejora_lines:
+        mejora_lines.append("- No se identificaron oportunidades de mejora relevantes con la evidencia disponible.")
+
+    contexto_resumen = contexto_previo.strip().splitlines()
+    contexto_excerpt = "\n".join(contexto_resumen[:8]).strip()
+    if not contexto_excerpt:
+        contexto_excerpt = "No se dispuso de un contexto organizacional legible para la redacción del informe."
+
+    return "\n".join(
+        [
+            "# INFORME EJECUTIVO FINAL DE AUDITORÍA ISO 45001",
+            "## CIDET",
+            "",
+            "### 1. Alcance y fuentes",
+            "El presente informe consolida la lectura del contexto organizacional generado por el Agente 1, la estructura de la matriz de verificación y las evidencias físicas disponibles en la carpeta del cliente.",
+            "",
+            "### 2. Síntesis del contexto",
+            contexto_excerpt,
+            "",
+            "### 3. Resumen de resultados de la matriz",
+            f"- Total de registros evaluados: {total_rows}",
+            f"- Cumple: {counts['Cumple']}",
+            f"- Cumple parcial: {counts['Cumple parcial']}",
+            f"- No cumple: {counts['No cumple']}",
+            f"- No aplica: {counts['No aplica']}",
+            f"- No evaluado: {counts['No evaluado']}",
+            "",
+            "### 4. Resumen por capítulos",
+            chapter_summary or "- No fue posible consolidar capítulos.",
+            "",
+            "### 5. Fortalezas y hallazgos conformes",
+            "\n".join(fortalezas_lines),
+            "",
+            "### 6. Aspectos por mejorar",
+            "\n".join(mejora_lines),
+            "",
+            "### 7. Conclusión",
+            "Con base en la matriz procesada, el informe refleja el estado documental disponible al momento del análisis. Las conclusiones deben complementarse con validación de campo cuando existan registros marcados como no evaluados o con evidencia insuficiente.",
+        ]
+    )
 
 
 def save_docx_report(title: str, body: str, output_path: Path) -> None:
@@ -555,17 +639,13 @@ Debes construir un objeto JSON con esta estructura exacta:
       "fuente": "Contexto Organizacional | Evidencia f?sica | Ambos | No disponible",
       "notas": "Aclaraciones breves"
     }}
-  ],
-  "report_text": "Informe final completo en el formato institucional de CIDET"
+  ]
 }}
 
 Reglas:
 - Incluye una entrada por cada ID de la matriz, en el mismo orden de la lista.
 - Si no hay evidencia suficiente, usa "No evaluado" y explica la limitaci?n.
 - No inventes datos no presentes en las fuentes.
-- El informe final debe ser formal, riguroso y estructurado como un informe ejecutivo de auditor?a de sistema de gesti?n ISO 45001.
-- En la secci?n de fortalezas y aspectos por mejorar, separa claramente hallazgos conformes y oportunidades de mejora.
-- Si no existen auditor?as previas o acciones de seguimiento evidenciadas, deja constancia expresa.
 - Devuelve el resultado con sintaxis JSON estricta.
 """
 
@@ -586,9 +666,7 @@ Reglas:
                             ruta_excel_lleno = ruta_base_limpia / "Lista_de_verificacion_Llenada.xlsx"
                             fill_checklist_workbook(EXCEL_TEMPLATE, ruta_excel_lleno, row_results)
 
-                            report_text = str(payload.get("report_text", "")).strip()
-                            if not report_text:
-                                report_text = informe_res.text or ""
+                            report_text = build_final_report(row_results, contexto_previo)
 
                             ruta_word_final = ruta_base_limpia / "Informe_Final_Auditoria_ISO45001.docx"
                             save_docx_report(
