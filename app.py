@@ -16,6 +16,11 @@ from google import genai
 from google.genai import types
 
 try:
+    from docling.document_converter import DocumentConverter
+except ModuleNotFoundError:
+    DocumentConverter = None
+
+try:
     from dotenv import load_dotenv
 except ModuleNotFoundError:
     load_dotenv = None
@@ -29,6 +34,29 @@ if load_dotenv is not None:
 
 DEFAULT_API_KEY = os.getenv("GEMINI_API_KEY", "")
 DEFAULT_MODELS = ("gemini-2.5-flash", "gemini-2.5-pro")
+EVIDENCE_SOURCE_FOLDER_NAME = "Evidencias"
+EVIDENCE_MARKDOWN_FOLDER_NAME = "Evidencias_Markdown"
+DOCILING_SUPPORTED_EXTENSIONS = {
+    ".bmp",
+    ".csv",
+    ".doc",
+    ".docx",
+    ".gif",
+    ".htm",
+    ".html",
+    ".jpeg",
+    ".jpg",
+    ".md",
+    ".pdf",
+    ".png",
+    ".pptx",
+    ".tif",
+    ".tiff",
+    ".txt",
+    ".webp",
+    ".xls",
+    ".xlsx",
+}
 
 
 INSTRUCCIONES_A1 = """
@@ -172,7 +200,7 @@ def iter_supported_text_files(base_dir: Path, exclude_folder_names: set[str] | N
     for candidate in base_dir.rglob("*"):
         if not candidate.is_file():
             continue
-        if candidate.suffix.lower() not in {".pdf", ".docx", ".txt"}:
+        if candidate.suffix.lower() not in {".pdf", ".docx", ".md", ".txt"}:
             continue
         if is_ignored_generated_file(candidate):
             continue
@@ -205,9 +233,82 @@ def read_text_from_file(file_path: Path) -> str:
 
 def find_evidence_folder(base_dir: Path) -> Path:
     for candidate in base_dir.rglob("*"):
-        if candidate.is_dir() and "evidenc" in candidate.name.lower():
+        if candidate.is_dir() and "evidenc" in candidate.name.lower() and "markdown" not in candidate.name.lower():
             return candidate
-    return base_dir / "Evidencias"
+    return base_dir / EVIDENCE_SOURCE_FOLDER_NAME
+
+
+def get_evidence_markdown_folder(base_dir: Path) -> Path:
+    return base_dir / EVIDENCE_MARKDOWN_FOLDER_NAME
+
+
+def iter_evidence_source_files(folder: Path) -> list[Path]:
+    files: list[Path] = []
+    if not folder.exists():
+        return files
+    for candidate in folder.rglob("*"):
+        if not candidate.is_file():
+            continue
+        if candidate.suffix.lower() not in DOCILING_SUPPORTED_EXTENSIONS:
+            continue
+        files.append(candidate)
+    return files
+
+
+def build_markdown_output_path(source_file: Path, source_root: Path, markdown_root: Path) -> Path:
+    relative_path = source_file.relative_to(source_root)
+    return markdown_root / relative_path.with_suffix(".md")
+
+
+def convert_evidences_to_markdown(
+    source_folder: Path,
+    markdown_folder: Path,
+) -> dict[str, int | list[str] | str]:
+    source_files = iter_evidence_source_files(source_folder)
+    result: dict[str, int | list[str] | str] = {
+        "source_folder": str(source_folder),
+        "markdown_folder": str(markdown_folder),
+        "processed": 0,
+        "converted": 0,
+        "skipped": 0,
+        "failed": [],
+    }
+
+    if not source_folder.exists():
+        return result
+
+    if DocumentConverter is None:
+        raise RuntimeError(
+            "Docling no está instalado en el entorno actual. "
+            "Instala la dependencia `docling` para convertir las evidencias a Markdown."
+        )
+
+    markdown_folder.mkdir(parents=True, exist_ok=True)
+    converter = DocumentConverter()
+
+    for source_file in source_files:
+        result["processed"] += 1
+        output_file = build_markdown_output_path(source_file, source_folder, markdown_folder)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            if output_file.exists() and output_file.stat().st_mtime >= source_file.stat().st_mtime:
+                result["skipped"] += 1
+                continue
+
+            conversion_result = converter.convert(str(source_file))
+            markdown_content = conversion_result.document.export_to_markdown().strip()
+            if not markdown_content:
+                markdown_content = f"# {source_file.name}\n\nNo se pudo extraer contenido legible con Docling."
+
+            output_file.write_text(markdown_content, encoding="utf-8")
+            result["converted"] += 1
+        except Exception as exc:
+            failed_entries = result["failed"]
+            if isinstance(failed_entries, list):
+                failed_entries.append(f"{source_file.name}: {exc}")
+
+    return result
 
 
 def collect_document_bundle(base_dir: Path) -> dict[str, dict[str, list[Path] | str]]:
@@ -216,7 +317,10 @@ def collect_document_bundle(base_dir: Path) -> dict[str, dict[str, list[Path] | 
         "organigrama": {"paths": [], "text": ""},
         "guia": {"paths": [], "text": ""},
     }
-    for file_path in iter_supported_text_files(base_dir, exclude_folder_names={"evidencias"}):
+    for file_path in iter_supported_text_files(
+        base_dir,
+        exclude_folder_names={"evidencias", "evidencias_markdown"},
+    ):
         name_lower = file_path.name.lower()
         content = read_text_from_file(file_path)
         content_lower = content.lower()
@@ -243,8 +347,13 @@ def collect_evidence_text(folder: Path) -> str:
     if not folder.exists():
         return ""
     supported_files = iter_supported_text_files(folder)
-    texts = [read_text_from_file(file_path) for file_path in supported_files]
-    return "\n\n".join(text for text in texts if text)
+    texts: list[str] = []
+    for file_path in supported_files:
+        text = read_text_from_file(file_path)
+        if not text:
+            continue
+        texts.append(f"# Archivo: {file_path.name}\n\n{text}")
+    return "\n\n".join(texts)
 
 
 def build_context_package(base_dir: Path, url_empresa: str) -> tuple[str, dict[str, list[str]]]:
@@ -629,7 +738,7 @@ def save_docx_report(title: str, body: str, output_path: Path) -> None:
 
 st.set_page_config(page_title="CIDET - Asistente de Auditoría IA", page_icon="⚡", layout="wide")
 
-st.title("⚡ CIDET - Asistente de Auditoría Asistida con IA")
+st.title("⚡ CIDET - Asistente de Auditoría Asistida con IA.")
 st.markdown("Optimización y automatización de diagnóstico organizacional y evaluación ISO 45001")
 st.write("---")
 
@@ -663,6 +772,7 @@ if ruta_base:
         st.stop()
 
     ruta_evidencias = find_evidence_folder(ruta_base_limpia)
+    ruta_evidencias_markdown = get_evidence_markdown_folder(ruta_base_limpia)
     paquete_contexto_base, documentos_detectados = build_context_package(ruta_base_limpia, url_empresa)
     documentos_faltantes = []
     if not documentos_detectados.get("camara"):
@@ -675,6 +785,7 @@ if ruta_base:
     st.success("📍 Conectado exitosamente a la carpeta del cliente.")
     if ruta_evidencias.exists():
         st.caption(f"Subcarpeta de evidencias detectada en: `{ruta_evidencias}`")
+        st.caption(f"Los Markdown normalizados se guardarán en: `{ruta_evidencias_markdown}`")
     else:
         st.warning("No se encontró automáticamente la subcarpeta de evidencias; se intentará usar la ruta esperada `Evidencias`.")
     if documentos_faltantes:
@@ -756,7 +867,15 @@ if ruta_base:
                             client = genai.Client(api_key=api_key_usuario.strip())
 
                             contexto_previo = archivo_contexto.read_text(encoding="utf-8")
-                            texto_evidencias = collect_evidence_text(ruta_evidencias)
+                            conversion_summary = convert_evidences_to_markdown(
+                                ruta_evidencias,
+                                ruta_evidencias_markdown,
+                            )
+                            texto_evidencias = collect_evidence_text(ruta_evidencias_markdown)
+                            if not texto_evidencias.strip():
+                                raise RuntimeError(
+                                    "No se obtuvo contenido Markdown legible desde la carpeta de evidencias."
+                                )
 
                             prompt_informe_completo = f"""
 Actúas como un Lead Auditor Senior de Sistemas de Gestión en CIDET.
@@ -802,6 +921,20 @@ Reglas:
                                 report_text,
                                 ruta_word_final,
                             )
+
+                            if conversion_summary["processed"]:
+                                st.info(
+                                    "Conversión a Markdown completada: "
+                                    f"{conversion_summary['converted']} convertidos, "
+                                    f"{conversion_summary['skipped']} reutilizados y "
+                                    f"{len(conversion_summary['failed'])} con error."
+                                )
+                            failed_entries = conversion_summary["failed"]
+                            if isinstance(failed_entries, list) and failed_entries:
+                                st.warning(
+                                    "Algunas evidencias no pudieron convertirse con Docling: "
+                                    + " | ".join(failed_entries[:5])
+                                )
 
                             st.success("?? ?Informe ejecutivo en Word generado con ?xito!")
                             st.info("Por ahora se omiti? la generaci?n del Excel para no bloquear la producci?n del informe final.")

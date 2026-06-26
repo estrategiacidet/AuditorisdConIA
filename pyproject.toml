@@ -11,6 +11,7 @@ requires-python = ">=3.14"
 dependencies = [
     "streamlit",
     "google-genai",
+    "docling",
     "pypdf",
     "openpyxl",
     "python-docx",
