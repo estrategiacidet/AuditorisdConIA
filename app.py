@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -14,13 +14,18 @@ import streamlit as st
 from docx import Document
 from google import genai
 from google.genai import types
-from dotenv import load_dotenv
+
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:
+    load_dotenv = None
 
 
 BASE_DIR = Path(__file__).resolve().parent
 EXCEL_TEMPLATE = BASE_DIR / "lista de verificación.xlsx"
 
-load_dotenv(BASE_DIR / ".env")
+if load_dotenv is not None:
+    load_dotenv(BASE_DIR / ".env")
 
 DEFAULT_API_KEY = os.getenv("GEMINI_API_KEY", "")
 DEFAULT_MODELS = ("gemini-2.5-flash", "gemini-2.5-pro")
@@ -539,6 +544,39 @@ def build_final_report(rows_payload: list[dict], contexto_previo: str) -> str:
     )
 
 
+def build_local_context_report(
+    base_dir: Path,
+    url_empresa: str,
+    documentos_detectados: dict[str, list[str]],
+    paquete_contexto_base: str,
+) -> str:
+    camara = ", ".join(documentos_detectados.get("camara", [])) or "No localizado"
+    organigrama = ", ".join(documentos_detectados.get("organigrama", [])) or "No localizado"
+    guia = ", ".join(documentos_detectados.get("guia", [])) or "No localizado"
+    url_texto = url_empresa.strip() or "No se proporcionó URL"
+
+    return "\n".join(
+        [
+            "# REPORTE DE CONTEXTO ORGANIZACIONAL",
+            "## Generación de respaldo local",
+            "",
+            "### 1. Ruta analizada",
+            str(base_dir),
+            "",
+            "### 2. URL asociada",
+            url_texto,
+            "",
+            "### 3. Documentos detectados",
+            f"- Cámara de Comercio / constitución: {camara}",
+            f"- Organigrama: {organigrama}",
+            f"- Informe guía: {guia}",
+            "",
+            "### 4. Insumo consolidado",
+            paquete_contexto_base.strip(),
+        ]
+    )
+
+
 def save_docx_report(title: str, body: str, output_path: Path) -> None:
     doc = Document()
     doc.add_heading(title, level=1)
@@ -637,12 +675,26 @@ if ruta_base:
                         st.text_area("Vista previa del Contexto:", response.text or "", height=300)
                     except Exception as exc:
                         if isinstance(exc, RuntimeError) and "Gemini devolvió un error temporal" in str(exc):
-                            st.error(
-                                "El Agente 1 no pudo completar la solicitud por una saturación temporal del modelo. "
-                                "Espera unos minutos y vuelve a intentar; el sistema ya habrá probado reintentos y un modelo alternativo."
+                            fallback_text = build_local_context_report(
+                                ruta_base_limpia,
+                                url_empresa,
+                                documentos_detectados,
+                                paquete_contexto_base,
                             )
+                            ruta_out_word = ruta_base_limpia / "Contexto_Organizacional.docx"
+                            ruta_out_txt = ruta_base_limpia / "Contexto_Organizacional.txt"
+                            save_docx_report(
+                                "Reporte de Contexto Organizacional y Pre-Diagnóstico",
+                                fallback_text,
+                                ruta_out_word,
+                            )
+                            ruta_out_txt.write_text(fallback_text, encoding="utf-8")
+                            st.warning(
+                                "El Agente 1 no logró usar Gemini por saturación temporal, pero la aplicación generó un contexto de respaldo local para no bloquear el flujo."
+                            )
+                            st.text_area("Vista previa del Contexto de respaldo:", fallback_text, height=300)
                         else:
-                            st.error(f"Ocurri? un error con el Agente 1: {exc}")
+                            st.error(f"Ocurrió un error con el Agente 1: {exc}")
 
     with tab2:
         st.subheader("Generación de hallazgos e informe final")
