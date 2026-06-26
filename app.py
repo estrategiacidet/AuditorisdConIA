@@ -577,10 +577,53 @@ def build_local_context_report(
     )
 
 
+def build_agent2_local_report(contexto_previo: str, texto_evidencias: str) -> str:
+    contexto_lineas = [line.strip() for line in contexto_previo.splitlines() if line.strip()]
+    evidencia_lineas = [line.strip() for line in texto_evidencias.splitlines() if line.strip()]
+    contexto_excerpt = "\n".join(contexto_lineas[:8]).strip() or "No se dispuso de un contexto legible."
+    evidencia_excerpt = "\n".join(evidencia_lineas[:12]).strip() or "No se localizaron evidencias legibles en la carpeta del cliente."
+
+    return "\n".join(
+        [
+            "# INFORME FINAL DE HALLAZGOS",
+            "",
+            "## 1. Resumen ejecutivo",
+            "Con la información disponible en el contexto organizacional y en las evidencias físicas localizadas, no fue posible realizar una evaluación exhaustiva de todos los componentes del sistema. El análisis se limita a la trazabilidad documental observada y a la cobertura real de las fuentes encontradas.",
+            "",
+            "## 2. Contexto analizado",
+            contexto_excerpt,
+            "",
+            "## 3. Evidencias revisadas",
+            evidencia_excerpt,
+            "",
+            "## 4. Hallazgos preliminares",
+            "- No se identificó una base documental suficiente para sostener una evaluación integral de todos los requisitos revisados.",
+            "- La lectura de las evidencias debe complementarse con validación de campo cuando existan vacíos, documentos incompletos o ausencia de trazabilidad.",
+            "",
+            "## 5. Conclusión",
+            "El resultado preliminar confirma la necesidad de profundizar la validación documental y operativa antes de emitir conclusiones definitivas sobre conformidad o no conformidad.",
+        ]
+    )
+
+
 def save_docx_report(title: str, body: str, output_path: Path) -> None:
     doc = Document()
     doc.add_heading(title, level=1)
-    doc.add_paragraph(body)
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            doc.add_paragraph("")
+            continue
+        if stripped.startswith("### "):
+            doc.add_heading(stripped[4:].strip(), level=3)
+            continue
+        if stripped.startswith("## "):
+            doc.add_heading(stripped[3:].strip(), level=2)
+            continue
+        if stripped.startswith("# "):
+            doc.add_heading(stripped[2:].strip(), level=1)
+            continue
+        doc.add_paragraph(stripped)
     doc.save(str(output_path))
 
 
@@ -698,7 +741,7 @@ if ruta_base:
 
     with tab2:
         st.subheader("Generación de hallazgos e informe final")
-        st.write("Esta fase leerá el contexto generado por el Agente 1 y las evidencias del cliente para producir hallazgos y redactar el informe final.")
+        st.write("Esta fase leerá el contexto generado por el Agente 1 y las evidencias del cliente para producir hallazgos y redactar el informe final, sin depender de la lista de verificación.")
 
         if st.button("?? Generar hallazgos e informe final", key="btn_agente2"):
             if not api_key_usuario.strip():
@@ -713,51 +756,30 @@ if ruta_base:
                             client = genai.Client(api_key=api_key_usuario.strip())
 
                             contexto_previo = archivo_contexto.read_text(encoding="utf-8")
-                            checklist_rows = read_checklist_rows(EXCEL_TEMPLATE) if EXCEL_TEMPLATE.exists() else []
-                            rows_texto = format_checklist_rows(checklist_rows) if checklist_rows else "No se pudo leer la matriz base desde el Excel."
                             texto_evidencias = collect_evidence_text(ruta_evidencias)
 
                             prompt_informe_completo = f"""
-Act?as como un Lead Auditor Senior de Sistemas de Gesti?n en CIDET. Debes devolver ?NICAMENTE JSON v?lido, sin bloques de c?digo ni texto adicional.
-Tu prioridad es identificar hallazgos, observaciones y no conformidades con base en las evidencias disponibles. No te limites a describir; analiza y clasifica cada numeral de forma t?cnica y objetiva.
+Actúas como un Lead Auditor Senior de Sistemas de Gestión en CIDET.
+Debes devolver únicamente un informe en texto plano, sin bloques de código ni JSON.
+Tu prioridad es identificar hallazgos, observaciones y no conformidades con base exclusivamente en el contexto organizacional generado por el Agente 1 y en las evidencias físicas del cliente.
+No leas ni utilices ninguna lista de verificación, matriz Excel o numerales obligatorios.
 
 INSUMO CLAVE 1 - Contexto Organizacional (Agente 1):
 {contexto_previo}
 
-INSUMO CLAVE 2 - Estructura y numerales obligatorios le?dos de la matriz de verificaci?n:
-{rows_texto}
-
-INSUMO CLAVE 3 - Evidencias f?sicas del cliente:
+INSUMO CLAVE 2 - Evidencias físicas del cliente:
 {texto_evidencias}
 
-Debes construir un objeto JSON con esta estructura exacta:
-{{
-  "rows": [
-    {{
-      "id": "LV-001",
-      "estado": "Cumple | Cumple parcial | No cumple | No aplica | No evaluado",
-      "puntaje": 1,
-      "tipo_hallazgo": "Conformidad | Observaci?n | No conformidad menor | No conformidad mayor | Sin evaluaci?n",
-      "criticidad": "Baja | Media | Alta | N/A",
-      "evidencia_encontrada": "Texto breve y objetivo",
-      "analisis_hallazgo": "An?lisis t?cnico documental",
-      "accion_recomendada": "Acci?n sugerida o 'No aplica'",
-      "responsable": "Cargo o ?rea sugerida",
-      "fecha_compromiso": "Por definir | No aplica | fecha orientativa",
-      "requiere_accion_correctiva": "S? | No",
-      "referencia_norma": "NTC-ISO 45001:2018, Decreto 1072 de 2015, Resoluci?n 0312 de 2019 u otra referencia aplicable",
-      "fuente": "Contexto Organizacional | Evidencia f?sica | Ambos | No disponible",
-      "notas": "Aclaraciones breves"
-    }}
-  ]
-}}
+Estructura obligatoria del informe:
+1. Título.
+2. Resumen ejecutivo de máximo dos párrafos.
+3. Hallazgos preliminares, en viñetas, con redacción técnica y objetiva.
+4. Conclusión.
 
 Reglas:
-- Incluye una entrada por cada ID de la matriz, en el mismo orden de la lista.
-- Si no hay evidencia suficiente, usa "No evaluado" y explica la limitaci?n.
-- Si existe evidencia parcial, prefiere "Observaci?n" o "No conformidad menor" cuando corresponda, y deja trazabilidad clara en `analisis_hallazgo`.
+- Usa únicamente la información disponible en las fuentes proporcionadas.
+- Si una evidencia no permite concluir, indícalo explícitamente como limitación.
 - No inventes datos no presentes en las fuentes.
-- Devuelve el resultado con sintaxis JSON estricta.
 """
 
                             informe_res = generate_content_with_retry(
@@ -766,17 +788,13 @@ Reglas:
                                 contents=prompt_informe_completo,
                                 config=types.GenerateContentConfig(
                                     temperature=0.2,
-                                    responseMimeType="application/json",
                                 ),
                                 label="El Agente 2",
                             )
 
-                            payload = parse_json_response(informe_res.text or "{}")
-                            row_results = payload.get("rows", [])
-                            if not isinstance(row_results, list):
-                                raise ValueError("La respuesta JSON no contiene la clave 'rows' como lista.")
-
-                            report_text = build_final_report(row_results, contexto_previo)
+                            report_text = (informe_res.text or "").strip()
+                            if not report_text:
+                                report_text = build_agent2_local_report(contexto_previo, texto_evidencias)
 
                             ruta_word_final = ruta_base_limpia / "Informe_Final_Auditoria_ISO45001.docx"
                             save_docx_report(
