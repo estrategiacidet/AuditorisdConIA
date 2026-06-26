@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Iterable
@@ -22,6 +23,7 @@ EXCEL_TEMPLATE = BASE_DIR / "lista de verificación.xlsx"
 load_dotenv(BASE_DIR / ".env")
 
 DEFAULT_API_KEY = os.getenv("GEMINI_API_KEY", "")
+DEFAULT_MODELS = ("gemini-2.5-flash", "gemini-2.5-pro")
 
 
 INSTRUCCIONES_A1 = """
@@ -83,6 +85,55 @@ Debes estructurar y entregar el informe siguiendo exactamente este formato de sa
 def normalize_path(raw_value: str) -> Path:
     cleaned = raw_value.strip().strip('"').strip("'")
     return Path(cleaned).expanduser().resolve()
+
+
+def is_retryable_genai_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    retryable_markers = (
+        "503",
+        "unavailable",
+        "high demand",
+        "service unavailable",
+        "temporarily unavailable",
+        "try again later",
+    )
+    return any(marker in message for marker in retryable_markers)
+
+
+def generate_content_with_retry(
+    client: genai.Client,
+    models: tuple[str, ...],
+    *,
+    contents: str,
+    config: types.GenerateContentConfig,
+    label: str,
+    max_attempts: int = 3,
+    base_delay_seconds: float = 2.0,
+):
+    last_error: Exception | None = None
+
+    for model_name in models:
+        delay = base_delay_seconds
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=config,
+                )
+            except Exception as exc:
+                last_error = exc
+                if not is_retryable_genai_error(exc) or attempt == max_attempts:
+                    break
+                time.sleep(delay)
+                delay = min(delay * 2, 10.0)
+
+    tried_models = ", ".join(models)
+    raise RuntimeError(
+        f"{label} no pudo completarse porque Gemini devolvió un error temporal. "
+        f"Se reintentó la solicitud y se probaron estos modelos: {tried_models}. "
+        f"Detalle original: {last_error}"
+    ) from last_error
 
 
 def iter_pdf_text(file_paths: Iterable[Path]) -> str:
@@ -510,9 +561,9 @@ with st.sidebar:
         help="También puedes definir la variable de entorno GEMINI_API_KEY.",
     )
     st.write("---")
-    st.markdown("**Desarrollado para el Líder de Estrategia e Innovación - CIDET**")
+    st.markdown("**Desarrollado para el auditor en sistemas de gestión - CIDET**")
 
-st.header("📁 1. Configuración del Proyecto del Cliente")
+st.header("📁 1. Información del cliente")
 
 ruta_base = st.text_input(
     "Pega aquí la ruta de la auditoría de la empresa que vas a procesar hoy:",
@@ -548,7 +599,7 @@ if ruta_base:
     if documentos_faltantes:
         st.warning("Documentos no localizados en la carpeta del cliente: " + ", ".join(documentos_faltantes))
 
-    tab1, tab2 = st.tabs(["🕵️ Agente 1: Investigador de Contexto", "📋 Agente 2: Matriz, Excel e Informe Final"])
+    tab1, tab2 = st.tabs(["🕵️ Agente 1: Investigador de Contexto", "📋 Agente 2: Hallazgos e Informe Final"])
 
     with tab1:
         st.subheader("An?lisis de C?mara de Comercio, Organigrama, Sitio Web e Informe Gu?a")
@@ -561,13 +612,15 @@ if ruta_base:
                     try:
                         client = genai.Client(api_key=api_key_usuario.strip())
 
-                        response = client.models.generate_content(
-                            model="gemini-2.5-flash",
+                        response = generate_content_with_retry(
+                            client,
+                            DEFAULT_MODELS,
                             contents=paquete_contexto_base,
                             config=types.GenerateContentConfig(
                                 system_instruction=INSTRUCCIONES_A1,
                                 temperature=0.2,
                             ),
+                            label="El Agente 1",
                         )
 
                         ruta_out_word = ruta_base_limpia / "Contexto_Organizacional.docx"
@@ -583,38 +636,43 @@ if ruta_base:
                         st.success("? ?Documento Word de Contexto generado con ?xito!")
                         st.text_area("Vista previa del Contexto:", response.text or "", height=300)
                     except Exception as exc:
-                        st.error(f"Ocurri? un error con el Agente 1: {exc}")
+                        if isinstance(exc, RuntimeError) and "Gemini devolvió un error temporal" in str(exc):
+                            st.error(
+                                "El Agente 1 no pudo completar la solicitud por una saturación temporal del modelo. "
+                                "Espera unos minutos y vuelve a intentar; el sistema ya habrá probado reintentos y un modelo alternativo."
+                            )
+                        else:
+                            st.error(f"Ocurri? un error con el Agente 1: {exc}")
 
     with tab2:
-        st.subheader("Generaci?n de matriz Excel completada e informe final")
-        st.write("Esta fase leer? el contexto generado por el Agente 1, las evidencias de la subcarpeta del cliente y completar? la matriz antes de redactar el informe final.")
+        st.subheader("Generación de hallazgos e informe final")
+        st.write("Esta fase leerá el contexto generado por el Agente 1 y las evidencias del cliente para producir hallazgos y redactar el informe final.")
 
-        if st.button("?? Generar Informe Basado en la Matriz", key="btn_agente2"):
+        if st.button("?? Generar hallazgos e informe final", key="btn_agente2"):
             if not api_key_usuario.strip():
                 st.error("Debes configurar tu Gemini API Key para ejecutar esta fase.")
             else:
                 archivo_contexto = ruta_base_limpia / "Contexto_Organizacional.txt"
                 if not archivo_contexto.exists():
                     st.error("No se encontr? el Contexto Organizacional. Debes ejecutar primero el Agente 1.")
-                elif not EXCEL_TEMPLATE.exists():
-                    st.error(f"No se encontr? el archivo `lista de verificaci?n.xlsx` en: {EXCEL_TEMPLATE}")
                 else:
-                    with st.spinner("Leyendo la estructura del Excel, completando la matriz y generando el informe final..."):
+                    with st.spinner("Leyendo el contexto, evaluando evidencias y generando hallazgos e informe final..."):
                         try:
                             client = genai.Client(api_key=api_key_usuario.strip())
 
                             contexto_previo = archivo_contexto.read_text(encoding="utf-8")
-                            checklist_rows = read_checklist_rows(EXCEL_TEMPLATE)
-                            rows_texto = format_checklist_rows(checklist_rows)
+                            checklist_rows = read_checklist_rows(EXCEL_TEMPLATE) if EXCEL_TEMPLATE.exists() else []
+                            rows_texto = format_checklist_rows(checklist_rows) if checklist_rows else "No se pudo leer la matriz base desde el Excel."
                             texto_evidencias = collect_evidence_text(ruta_evidencias)
 
                             prompt_informe_completo = f"""
 Act?as como un Lead Auditor Senior de Sistemas de Gesti?n en CIDET. Debes devolver ?NICAMENTE JSON v?lido, sin bloques de c?digo ni texto adicional.
+Tu prioridad es identificar hallazgos, observaciones y no conformidades con base en las evidencias disponibles. No te limites a describir; analiza y clasifica cada numeral de forma t?cnica y objetiva.
 
 INSUMO CLAVE 1 - Contexto Organizacional (Agente 1):
 {contexto_previo}
 
-INSUMO CLAVE 2 - Estructura y numerales obligatorios le?dos del Excel de verificaci?n:
+INSUMO CLAVE 2 - Estructura y numerales obligatorios le?dos de la matriz de verificaci?n:
 {rows_texto}
 
 INSUMO CLAVE 3 - Evidencias f?sicas del cliente:
@@ -645,26 +703,26 @@ Debes construir un objeto JSON con esta estructura exacta:
 Reglas:
 - Incluye una entrada por cada ID de la matriz, en el mismo orden de la lista.
 - Si no hay evidencia suficiente, usa "No evaluado" y explica la limitaci?n.
+- Si existe evidencia parcial, prefiere "Observaci?n" o "No conformidad menor" cuando corresponda, y deja trazabilidad clara en `analisis_hallazgo`.
 - No inventes datos no presentes en las fuentes.
 - Devuelve el resultado con sintaxis JSON estricta.
 """
 
-                            informe_res = client.models.generate_content(
-                                model="gemini-2.5-flash",
+                            informe_res = generate_content_with_retry(
+                                client,
+                                DEFAULT_MODELS,
                                 contents=prompt_informe_completo,
                                 config=types.GenerateContentConfig(
                                     temperature=0.2,
                                     responseMimeType="application/json",
                                 ),
+                                label="El Agente 2",
                             )
 
                             payload = parse_json_response(informe_res.text or "{}")
                             row_results = payload.get("rows", [])
                             if not isinstance(row_results, list):
                                 raise ValueError("La respuesta JSON no contiene la clave 'rows' como lista.")
-
-                            ruta_excel_lleno = ruta_base_limpia / "Lista_de_verificacion_Llenada.xlsx"
-                            fill_checklist_workbook(EXCEL_TEMPLATE, ruta_excel_lleno, row_results)
 
                             report_text = build_final_report(row_results, contexto_previo)
 
@@ -675,12 +733,18 @@ Reglas:
                                 ruta_word_final,
                             )
 
-                            st.success("?? ?Excel completado e informe ejecutivo en Word generado con ?xito!")
-                            st.markdown(f"?? **Excel guardado en:** `{ruta_excel_lleno}`")
+                            st.success("?? ?Informe ejecutivo en Word generado con ?xito!")
+                            st.info("Por ahora se omiti? la generaci?n del Excel para no bloquear la producci?n del informe final.")
                             st.markdown(f"?? **Informe guardado en:** `{ruta_word_final}`")
                             st.subheader("?? Vista Previa del Informe Redactado:")
                             st.text_area("Contenido:", report_text, height=400)
                         except Exception as exc:
-                            st.error(f"Ocurri? un error en el procesamiento combinado: {exc}")
+                            if isinstance(exc, RuntimeError) and "Gemini devolvió un error temporal" in str(exc):
+                                st.error(
+                                    "El Agente 2 no pudo completar la generación porque Gemini respondió temporalmente con saturación. "
+                                    "Vuelve a intentarlo en unos minutos."
+                                )
+                            else:
+                                st.error(f"Ocurri? un error en el procesamiento combinado: {exc}")
 else:
     st.info("Ingresa la ruta de la carpeta del cliente para comenzar.")
